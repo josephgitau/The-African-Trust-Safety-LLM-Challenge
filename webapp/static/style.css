@@ -992,3 +992,113 @@ details summary:hover { color: var(--text); }
     color: var(--text-muted);
     margin-bottom: 6px;
 }
+
+/* ============================================================
+   BREAK GENERATOR TAB
+   ============================================================ */
+
+.generator-model-bar {
+    padding: 12px 16px;
+}
+
+.gen-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 12px;
+}
+
+/* Generated prompt card */
+.generated-prompt-card {
+    border-left: 4px solid var(--border-subtle);
+    transition: border-color 0.2s;
+    margin-bottom: 12px;
+}
+.generated-prompt-card.gen-card-break   { border-left-color: var(--status-break); }
+.generated-prompt-card.gen-card-partial { border-left-color: var(--status-partial); }
+.generated-prompt-card.gen-card-failed  { border-left-color: var(--status-refused); }
+
+.gen-card-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    flex-shrink: 0;
+}
+
+.gen-prompt-textarea {
+    width: 100%;
+    resize: vertical;
+    min-height: 80px;
+    font-size: 13px;
+}
+
+.gen-rationale {
+    font-size: 12px;
+    font-style: italic;
+    margin: 4px 0 0;
+    line-height: 1.5;
+}
+
+/* Strategy badge */
+.strategy-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+.gen-badge-untested { background: var(--bg-tertiary); color: var(--text-muted); }
+.gen-badge-break    { background: rgba(239,68,68,0.15);  color: var(--status-break); }
+.gen-badge-partial  { background: rgba(245,158,11,0.15); color: var(--status-partial); }
+.gen-badge-failed   { background: rgba(107,114,128,0.15); color: var(--status-refused); }
+
+/* Memory summary */
+.generator-memory-summary { }
+
+.gen-memory-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.gen-memory-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 13px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.gen-memory-label { color: var(--text-secondary); }
+.gen-memory-val   { font-weight: 600; }
+.gen-val-break    { color: var(--status-break); }
+.gen-val-refused  { color: var(--status-refused); }
+
+/* Feedback log */
+.gen-feedback-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: 13px;
+}
+.gen-feedback-prompt {
+    flex: 1;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.gen-feedback-ts {
+    font-size: 11px;
+    flex-shrink: 0;
+}

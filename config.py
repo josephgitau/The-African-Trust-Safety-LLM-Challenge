@@ -16,6 +16,19 @@ MODELS = {
         "architecture": "gemma2",
         "chat_template": "chatml",  # uses <|im_start|> / <|im_end|>
     },
+    "hauhau": {
+        "name": "Gemma-4-E2B-Uncensored-Aggressive",
+        "repo_id": "HauhauCS/Gemma-4-E2B-Uncensored-HauhauCS-Aggressive",
+        "gguf_file": "Gemma-4-E2B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf",
+        "language": "multilingual",
+        "architecture": "gguf",       # llama-cpp-python, not HF transformers
+        "role": "generator",          # break-generator only, never a target model
+        "n_gpu_layers": -1,            # all layers on GPU (16 GB VRAM)
+        "n_ctx": 8192,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 64,
+    },
     "hausa": {
         "name": "N-ATLaS (Hausa)",
         "repo_id": "NCAIR1/N-ATLaS",

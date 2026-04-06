@@ -148,3 +148,41 @@ def get_prompt_history(limit: int = 50) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Hauhau generator memory helpers
+# ---------------------------------------------------------------------------
+
+def get_recent_breaks_for_context(language: str, limit: int = 20) -> list[dict]:
+    """Lightweight break records for building Hauhau memory context."""
+    conn = get_connection()
+    if language:
+        rows = conn.execute(
+            """SELECT attack_type, risk_subcategory, prompt_english, contextual_notes
+               FROM breaks WHERE language = ?
+               ORDER BY created_at DESC LIMIT ?""",
+            (language, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT attack_type, risk_subcategory, prompt_english, contextual_notes
+               FROM breaks ORDER BY created_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_failed_attempts_for_context(language: str, limit: int = 30) -> list[dict]:
+    """Recent FULL_REFUSAL history entries — teaches generator what to avoid."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT prompt, status FROM prompt_history
+           WHERE status = 'FULL_REFUSAL'
+             AND (model_key LIKE ? OR model_key = 'hauhau_generator')
+           ORDER BY created_at DESC LIMIT ?""",
+        (f"%{language.lower()}%" if language else "%", limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

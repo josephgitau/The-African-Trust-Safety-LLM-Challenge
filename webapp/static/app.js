@@ -29,6 +29,7 @@ async function init() {
         loadHistory(),
         populateModelSelector(),
         loadOpenAIModel(),
+        checkHauhauStatus(),
     ]);
 }
 
@@ -48,6 +49,7 @@ function switchTab(tab) {
     if (tab === 'breaks') loadBreaks();
     if (tab === 'lab') loadHistory();
     if (tab === 'analysis') loadAnalysis();
+    if (tab === 'generator') initGeneratorTab();
 }
 
 // ===== EVENT LISTENERS =====
@@ -142,9 +144,8 @@ async function saveApiKey() {
     try {
         await api('/api/settings/apikey', { method: 'POST', body: JSON.stringify({ api_key: key }) });
         state.apiKeySet = true;
-        localStorage.setItem('_rtk', key);
         updateApiIndicator(true);
-        showToast('API key saved');
+        showToast('API key saved for this session');
     } catch (e) { showToast(e.message, 'error'); }
 }
 
@@ -153,14 +154,7 @@ async function checkApiKeyStatus() {
         const d = await api('/api/settings/apikey/status');
         state.apiKeySet = d.is_set;
         updateApiIndicator(d.is_set);
-        if (!d.is_set) {
-            const saved = localStorage.getItem('_rtk');
-            if (saved) {
-                await api('/api/settings/apikey', { method: 'POST', body: JSON.stringify({ api_key: saved }) });
-                state.apiKeySet = true;
-                updateApiIndicator(true);
-            }
-        }
+        if (window.localStorage) localStorage.removeItem('_rtk');
     } catch (e) { /* ignore */ }
 }
 
@@ -664,50 +658,82 @@ async function translateToLocal() {
 }
 
 // ===== SAVE BREAK MODAL =====
-function openSaveModal() {
+function hasLocallyConfirmedBreak() {
+    return Boolean(state.lastValidation?.confirmed);
+}
+
+function canSaveBreakWithCurrentEvidence() {
+    const verdict = state._saveVerified?.verdict;
+    return hasLocallyConfirmedBreak() || verdict === 'FULL_BREAK' || verdict === 'PARTIAL_BREAK';
+}
+
+function getCurrentBreakDraft() {
+    return {
+        prompt: state.lastRun?.prompt || '',
+        response: state.lastValidation?.best_response || state.lastRun?.response || '',
+        breakCount: state.lastValidation?.break_count || 1,
+        totalRuns: state.lastValidation?.total_runs || 1,
+        locallyConfirmed: hasLocallyConfirmedBreak(),
+    };
+}
+
+async function fetchNextAttackId() {
+    try {
+        const d = await api('/api/breaks/next-id');
+        return d.attack_id || '';
+    } catch (_) {
+        return '';
+    }
+}
+
+async function openSaveModal() {
     if (!state.lastRun && !state.lastValidation)
         return showToast('Run a prompt first', 'error');
 
-    if (!state.apiKeySet)
-        return showToast('Set OpenAI API key first — AI verification is required to save breaks', 'error');
+    const draft = getCurrentBreakDraft();
+    if (!draft.response)
+        return showToast('No response available to save', 'error');
 
-    const prompt = state.lastRun?.prompt || '';
-    const response = state.lastValidation?.best_response || state.lastRun?.response || '';
+    if (!state.apiKeySet && !draft.locallyConfirmed)
+        return showToast('Validate 3× first or set an OpenAI API key to use AI verification.', 'error');
 
-    $('save-prompt-preview').textContent = prompt;
-    $('save-response-preview').textContent = response;
-    $('save-prompt-english').value = '';
+    $('save-prompt-preview').textContent = draft.prompt;
+    $('save-response-preview').textContent = draft.response;
+    $('save-prompt-english').value = state._lastTranslation || '';
     $('save-notes').value = '';
     $('save-translate-status').textContent = '';
     $('save-notes-status').textContent = '';
 
-    // Reset AI verification state
     state._saveVerified = null;
     $('save-verify-result').classList.add('hidden');
     $('save-verify-result').innerHTML = '';
-    $('btn-confirm-save').disabled = true; // disabled until AI verifies
+    $('btn-confirm-save').disabled = !draft.locallyConfirmed;
 
-    // Auto-generate attack ID based on existing breaks count
-    const nextId = `B${state.breaks.length + 1}`;
-    $('save-attack-id').value = nextId;
+    $('save-attack-id').value = await fetchNextAttackId();
 
-    // Populate modal dropdowns from taxonomy
     populateSaveDropdowns();
-
-    // Set dropdown values from lab selectors
     $('save-attack-type-sel').value = $('sel-attack-type').value || '';
     $('save-risk-cat-sel').value = $('sel-risk-category').value || '';
     updateSaveSubcategories();
     $('save-risk-sub-sel').value = $('sel-risk-subcategory').value || '';
-
-    const bc = state.lastValidation?.break_count || 1;
-    const tr = state.lastValidation?.total_runs || 1;
-    $('save-score').textContent = `${bc}/${tr}`;
+    $('save-score').textContent = `${draft.breakCount}/${draft.totalRuns}`;
 
     $('save-modal').classList.remove('hidden');
 
-    // Auto-run AI tasks (always — API key is checked above)
-    runSaveAI(prompt, response, bc, tr);
+    if (state.apiKeySet) {
+        runSaveAI(draft.prompt, draft.response, draft.breakCount, draft.totalRuns);
+        return;
+    }
+
+    $('save-translate-status').textContent = '(manual entry required)';
+    $('save-notes-status').textContent = '(manual entry required)';
+    const verifyEl = $('save-verify-result');
+    verifyEl.classList.remove('hidden');
+    verifyEl.innerHTML = `
+        <div style="padding:10px 14px;border-radius:8px;border:1px solid rgba(59,130,246,.3);background:rgba(59,130,246,.06)">
+            <strong>Manual save mode:</strong> local validation confirmed this break at ${draft.breakCount}/${draft.totalRuns}.
+            <p style="font-size:12px;margin:4px 0 0;color:var(--text-muted)">Fill in the English translation and contextual notes before saving.</p>
+        </div>`;
 }
 
 function populateSaveDropdowns() {
@@ -749,22 +775,21 @@ function updateSaveSubcategories() {
 async function runSaveAI(prompt, response, bc, tr) {
     const progress = $('save-ai-progress');
     const status = $('save-ai-status');
+    const locallyConfirmed = hasLocallyConfirmedBreak();
     progress.classList.remove('hidden');
-    state._saveVerified = null; // reset verification state
+    state._saveVerified = null;
 
-    // Clear previous verify result
     const verifyEl = $('save-verify-result');
     verifyEl.classList.add('hidden');
     verifyEl.innerHTML = '';
 
-    let tasks = [];
+    const tasks = [];
     let completed = 0;
-    const total = 4; // translate, categorize, notes, verify
+    const total = 4;
     const updateStatus = () => {
         status.textContent = `AI auto-fill: ${completed}/${total} done...`;
     };
 
-    // 1. Translate prompt to English
     const translateTask = (async () => {
         try {
             $('save-translate-status').textContent = '(translating...)';
@@ -785,7 +810,6 @@ async function runSaveAI(prompt, response, bc, tr) {
     })();
     tasks.push(translateTask);
 
-    // 2. Categorize attack
     const categorizeTask = (async () => {
         try {
             const d = await api('/api/openai/categorize', {
@@ -812,13 +836,12 @@ async function runSaveAI(prompt, response, bc, tr) {
     })();
     tasks.push(categorizeTask);
 
-    // 3. Generate contextual notes (needs translation, but start anyway)
     const notesTask = (async () => {
         try {
-            await translateTask; // wait for translation first
+            await translateTask;
             $('save-notes-status').textContent = '(generating notes...)';
             const englishPrompt = $('save-prompt-english').value || prompt;
-            const modelName = state.modelInfo?.name || '';
+            const modelName = state.modelInfo?.model_name || state.modelInfo?.model || '';
             const d = await api('/api/openai/context', {
                 method: 'POST',
                 body: JSON.stringify({
@@ -845,7 +868,6 @@ async function runSaveAI(prompt, response, bc, tr) {
     })();
     tasks.push(notesTask);
 
-    // 4. AI Break Verification (critical gate for saving)
     const verifyTask = (async () => {
         try {
             const d = await api('/api/openai/verify-refusal', {
@@ -860,18 +882,23 @@ async function runSaveAI(prompt, response, bc, tr) {
             else if (d.verdict === 'PARTIAL_BREAK') { cls = 'badge-partial'; lbl = 'PARTIAL BREAK'; icon = '⚠️'; }
             else { cls = 'badge-refused'; lbl = 'NOT A BREAK'; icon = '🚫'; }
             const isBreak = d.verdict === 'FULL_BREAK' || d.verdict === 'PARTIAL_BREAK';
+            const canSave = isBreak || locallyConfirmed;
+            const followUp = !isBreak
+                ? locallyConfirmed
+                    ? `<p style="font-size:12px;margin:4px 0 0;color:var(--yellow);font-weight:600">AI was not convinced, but local validation confirmed the break. Review it manually before saving.</p>`
+                    : `<p style="font-size:12px;margin:4px 0 0;color:var(--accent);font-weight:600">This response does not appear to be a safety break. Saving is blocked.</p>`
+                : '';
             vEl.innerHTML = `
-                <div style="padding:10px 14px;border-radius:8px;border:1px solid ${isBreak ? 'rgba(34,197,94,.3)' : 'rgba(239,68,68,.3)'};background:${isBreak ? 'rgba(34,197,94,.06)' : 'rgba(239,68,68,.06)'}">
+                <div style="padding:10px 14px;border-radius:8px;border:1px solid ${canSave ? 'rgba(34,197,94,.3)' : 'rgba(239,68,68,.3)'};background:${canSave ? 'rgba(34,197,94,.06)' : 'rgba(239,68,68,.06)'}">
                     <div style="display:flex;gap:10px;align-items:center;margin-bottom:4px">
                         <strong>${icon} AI Verification:</strong>
                         <span class="badge ${cls}">${lbl}</span>
                         <span class="text-muted">Confidence: ${d.confidence}%</span>
                     </div>
-                    <p style="font-size:12px;margin:0;color:var(--fg-muted)">${escapeHtml(d.reason)}</p>
-                    ${!isBreak ? '<p style="font-size:12px;margin:4px 0 0;color:var(--accent);font-weight:600">⚠ This response does not appear to be a safety break. Saving is blocked.</p>' : ''}
+                    <p style="font-size:12px;margin:0;color:var(--text-muted)">${escapeHtml(d.reason)}</p>
+                    ${followUp}
                 </div>`;
-            // Enable/disable save button
-            $('btn-confirm-save').disabled = !isBreak;
+            $('btn-confirm-save').disabled = !canSave;
         } catch (e) {
             state._saveVerified = { verdict: 'ERROR', confidence: 0, reason: e.message };
             const vEl = $('save-verify-result');
@@ -879,9 +906,9 @@ async function runSaveAI(prompt, response, bc, tr) {
             vEl.innerHTML = `
                 <div style="padding:10px 14px;border-radius:8px;border:1px solid rgba(234,179,8,.3);background:rgba(234,179,8,.06)">
                     <strong>⚠ AI Verification failed:</strong> ${escapeHtml(e.message)}
-                    <p style="font-size:12px;margin:4px 0 0;color:var(--fg-muted)">You can still save, but break verification was not confirmed.</p>
+                    <p style="font-size:12px;margin:4px 0 0;color:var(--text-muted)">${locallyConfirmed ? 'Local validation still confirmed the break, so manual save remains available.' : 'Run Validate 3× or retry AI verification before saving.'}</p>
                 </div>`;
-            $('btn-confirm-save').disabled = false;
+            $('btn-confirm-save').disabled = !locallyConfirmed;
         }
         completed++;
         updateStatus();
@@ -894,38 +921,43 @@ async function runSaveAI(prompt, response, bc, tr) {
 }
 
 function rerunSaveAI() {
-    const prompt = $('save-prompt-preview').textContent;
-    const response = $('save-response-preview').textContent;
+    const draft = getCurrentBreakDraft();
+    if (!state.apiKeySet) return showToast('Set OpenAI API key first', 'error');
     $('save-prompt-english').value = '';
     $('save-notes').value = '';
-    const score = $('save-score').textContent.split('/');
-    runSaveAI(prompt, response, parseInt(score[0]) || 1, parseInt(score[1]) || 1);
+    runSaveAI(draft.prompt, draft.response, draft.breakCount, draft.totalRuns);
 }
 
 function closeSaveModal() { $('save-modal').classList.add('hidden'); }
 
 async function confirmSaveBreak() {
-    // Gate on AI verification
-    const v = state._saveVerified;
-    if (v && v.verdict !== 'FULL_BREAK' && v.verdict !== 'PARTIAL_BREAK' && v.verdict !== 'ERROR') {
-        return showToast('AI verification says this is NOT a break. Cannot save.', 'error');
+    const draft = getCurrentBreakDraft();
+    if (!canSaveBreakWithCurrentEvidence()) {
+        return showToast('Save requires either a confirmed validation run or an AI break verification.', 'error');
     }
-
-    const prompt = state.lastRun?.prompt || '';
-    const response = state.lastValidation?.best_response || state.lastRun?.response || '';
 
     const body = {
         attack_id: $('save-attack-id').value.trim(),
         attack_type: $('save-attack-type-sel').value,
         risk_category: $('save-risk-cat-sel').value,
         risk_subcategory: $('save-risk-sub-sel').value,
-        prompt_original: prompt,
+        prompt_original: draft.prompt,
         prompt_english: $('save-prompt-english').value.trim(),
-        response,
+        response: draft.response,
         contextual_notes: $('save-notes').value.trim(),
-        break_count: state.lastValidation?.break_count || 1,
-        total_runs: state.lastValidation?.total_runs || 1,
+        break_count: draft.breakCount,
+        total_runs: draft.totalRuns,
     };
+
+    if (!body.attack_type || !body.risk_category || !body.risk_subcategory) {
+        return showToast('Complete the taxonomy fields before saving.', 'error');
+    }
+    if (!body.prompt_english) {
+        return showToast('Add an English translation before saving.', 'error');
+    }
+    if (!body.contextual_notes) {
+        return showToast('Add contextual notes before saving.', 'error');
+    }
 
     try {
         const d = await api('/api/breaks', { method: 'POST', body: JSON.stringify(body) });
@@ -956,7 +988,8 @@ function renderBreaks() {
     el.innerHTML = state.breaks.map(b => {
         const missingEnglish = !b.prompt_english;
         const missingNotes = !b.contextual_notes;
-        const complete = !missingEnglish && !missingNotes;
+        const needsValidation = (b.total_runs || 0) < 2 || (b.break_count || 0) < 2;
+        const complete = !missingEnglish && !missingNotes && !needsValidation;
         return `
         <div class="break-card" id="break-${b.id}">
             <div class="break-header" onclick="toggleBreak(${b.id})">
@@ -971,7 +1004,8 @@ function renderBreaks() {
                     <div class="break-completeness">
                         ${missingEnglish ? '<span class="completeness-tag missing">No translation</span>' : ''}
                         ${missingNotes ? '<span class="completeness-tag missing">No notes</span>' : ''}
-                        ${complete ? '<span class="completeness-tag ok">Complete</span>' : ''}
+                        ${needsValidation ? '<span class="completeness-tag missing">Needs validation</span>' : ''}
+                        ${complete ? '<span class="completeness-tag ok">Submission-ready</span>' : ''}
                     </div>
                     <span class="text-muted">${new Date(b.created_at + 'Z').toLocaleDateString()}</span>
                 </div>
@@ -1047,26 +1081,29 @@ async function loadExportPreview() {
     const name = $('export-team-name').value.trim() || 'team_name';
     try {
         const d = await api(`/api/export/markdown?team_name=${encodeURIComponent(name)}`);
-        $('export-preview').textContent = d.markdown;
-        // Quality warnings
+        $('export-preview').textContent = d.markdown || 'No submission-ready breaks to export yet.';
+
         const warnings = [];
-        const breaks = state.breaks;
-        if (!breaks.length) {
+        const issueSummary = d.issues_summary || {};
+        if (!d.total_breaks) {
             warnings.push('No breaks saved yet. You need at least 1 break to submit.');
         } else {
-            const noEnglish = breaks.filter(b => !b.prompt_english).length;
-            const noNotes = breaks.filter(b => !b.contextual_notes).length;
-            const lowScore = breaks.filter(b => b.break_count < 2).length;
-            if (noEnglish) warnings.push(`${noEnglish} break(s) missing English translation — required for submission.`);
-            if (noNotes) warnings.push(`${noNotes} break(s) missing contextual notes — strongly impacts evaluation score.`);
-            if (lowScore) warnings.push(`${lowScore} break(s) with low consistency (< 2/${breaks[0]?.total_runs || 3} runs).`);
-            if (breaks.length < 10) warnings.push(`Only ${breaks.length} break(s) saved. More diverse attacks = stronger submission.`);
+            if (!d.count) {
+                warnings.push(`No submission-ready breaks yet. Export only includes breaks with translations, contextual notes, and at least ${d.min_break_count}/${d.min_total_runs} validation.`);
+            }
+            if (issueSummary.missing_prompt_english) warnings.push(`${issueSummary.missing_prompt_english} break(s) missing English translation.`);
+            if (issueSummary.missing_contextual_notes) warnings.push(`${issueSummary.missing_contextual_notes} break(s) missing contextual notes.`);
+            if (issueSummary.not_validated) warnings.push(`${issueSummary.not_validated} break(s) were never validated with multiple runs.`);
+            if (issueSummary.insufficient_break_count) warnings.push(`${issueSummary.insufficient_break_count} break(s) did not reproduce strongly enough for export.`);
+            if (d.excluded_count) warnings.push(`${d.excluded_count} saved break(s) were excluded from this export until they are cleaned up.`);
+            if (d.count && d.count < 10) warnings.push(`Only ${d.count} submission-ready break(s) are currently exportable. More diverse clean breaks will strengthen the submission.`);
         }
+
         const wEl = $('export-warnings');
         if (wEl) {
             wEl.innerHTML = warnings.length
                 ? warnings.map(w => `<div class="export-warning">${esc(w)}</div>`).join('')
-                : '<div class="export-warning" style="border-color:var(--green);color:var(--green)">All breaks look complete. Ready to export!</div>';
+                : '<div class="export-warning" style="border-color:var(--green);color:var(--green)">All exported breaks are submission-ready.</div>';
         }
     } catch (e) {
         $('export-preview').textContent = e.message;
@@ -1075,7 +1112,7 @@ async function loadExportPreview() {
 
 function downloadExport() {
     const text = $('export-preview').textContent;
-    if (!text) return showToast('Preview first', 'error');
+    if (!text || text === 'No submission-ready breaks to export yet.') return showToast('Preview a valid export first', 'error');
     const blob = new Blob([text], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1392,3 +1429,291 @@ function useBatchResult(index) {
     displayResponse(state.lastRun);
     showToast('Result loaded — click Save Break to save');
 }
+
+// ============================================================
+// BREAK GENERATOR TAB (Hauhau — Gemma-4-E2B-Uncensored)
+// ============================================================
+
+const generatorState = {
+    loaded: false,
+    prompts: [],          // last generated prompt cards
+    feedbackLog: [],      // [{prompt, status, ts}]
+    memorySummaryOpen: true,
+};
+
+// Called automatically on switchTab('generator')
+async function initGeneratorTab() {
+    await checkHauhauStatus();
+    populateGenTaxonomy();
+    $('gen-risk-cat').addEventListener('change', updateGenSubcategories);
+}
+
+async function checkHauhauStatus() {
+    try {
+        const data = await api('/api/hauhau/status');
+        generatorState.loaded = data.loaded;
+        _renderGenStatus(data.loaded);
+    } catch (_) {
+        _renderGenStatus(false);
+    }
+}
+
+function _renderGenStatus(loaded) {
+    const dot = $('gen-status-dot');
+    const txt = $('gen-status-text');
+    const btnLoad = $('btn-gen-load');
+    const btnUnload = $('btn-gen-unload');
+    const btnGen = $('btn-generate-breaks');
+
+    if (loaded) {
+        dot.className = 'status-dot online';
+        txt.textContent = 'Gemma-4-E2B-Uncensored-Aggressive — Loaded (GPU)';
+        btnLoad.classList.add('hidden');
+        btnUnload.classList.remove('hidden');
+        btnGen.disabled = false;
+    } else {
+        dot.className = 'status-dot offline';
+        txt.textContent = 'Gemma-4-E2B-Uncensored — Not loaded';
+        btnLoad.classList.remove('hidden');
+        btnUnload.classList.add('hidden');
+        btnGen.disabled = true;
+    }
+}
+
+async function loadHauhauModel() {
+    const btn = $('btn-gen-load');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Loading…';
+    try {
+        await api('/api/hauhau/load', { method: 'POST' });
+        generatorState.loaded = true;
+        _renderGenStatus(true);
+        showToast('Gemma-4 loaded — GPU ready');
+    } catch (e) {
+        showToast(e.message, 'error');
+        btn.disabled = false;
+        btn.innerHTML = 'Load Model';
+    }
+}
+
+async function unloadHauhauModel() {
+    try {
+        await api('/api/hauhau/unload', { method: 'POST' });
+        generatorState.loaded = false;
+        _renderGenStatus(false);
+        showToast('Model unloaded');
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
+function populateGenTaxonomy() {
+    // Reuse already-loaded taxonomy from state
+    const { attackTypes, riskCategories } = state.taxonomy;
+
+    const atSel = $('gen-attack-type');
+    atSel.innerHTML = '<option value="">Any / Let model decide</option>';
+    attackTypes.forEach(at => {
+        const o = document.createElement('option');
+        o.value = at['Attack Type'];
+        o.textContent = at['Attack Type'];
+        atSel.appendChild(o);
+    });
+
+    const rcSel = $('gen-risk-cat');
+    rcSel.innerHTML = '<option value="">Any</option>';
+    riskCategories.forEach(rc => {
+        const o = document.createElement('option');
+        o.value = rc['Risk Category'];
+        o.textContent = rc['Risk Category'];
+        rcSel.appendChild(o);
+    });
+
+    updateGenSubcategories();
+}
+
+function updateGenSubcategories() {
+    const cat = $('gen-risk-cat').value;
+    const sub = $('gen-risk-sub');
+    const subs = cat
+        ? state.taxonomy.riskSubcategories.filter(s => s['Risk Category'] === cat)
+        : state.taxonomy.riskSubcategories;
+    sub.innerHTML = '<option value="">Any</option>';
+    subs.forEach(s => {
+        const o = document.createElement('option');
+        o.value = s['Risk Subcategory'];
+        o.textContent = s['Risk Subcategory'];
+        sub.appendChild(o);
+    });
+}
+
+async function generateBreakPrompts() {
+    if (!generatorState.loaded) {
+        showToast('Load the Hauhau model first', 'error');
+        return;
+    }
+
+    const btn = $('btn-generate-breaks');
+    const spinner = $('gen-spinner');
+    const errEl = $('gen-error');
+    errEl.textContent = '';
+    btn.disabled = true;
+    spinner.classList.remove('hidden');
+    $('gen-prompts-container').innerHTML = '';
+
+    const payload = {
+        language: $('gen-language').value,
+        attack_type: $('gen-attack-type').value,
+        risk_category: $('gen-risk-cat').value,
+        risk_subcategory: $('gen-risk-sub').value,
+        count: parseInt($('gen-count').value, 10),
+        additional_context: $('gen-extra-context').value.trim(),
+    };
+
+    try {
+        const data = await api('/api/hauhau/generate', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        });
+
+        generatorState.prompts = data.prompts;
+        _renderMemorySummary(data.memory_summary);
+        _renderGeneratedPrompts(data.prompts, payload.language, payload.attack_type);
+    } catch (e) {
+        errEl.textContent = e.message;
+        showToast(e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+    }
+}
+
+function _renderMemorySummary(summary) {
+    const card = $('gen-memory-card');
+    const stats = $('gen-memory-stats');
+    card.style.display = '';
+
+    stats.innerHTML = `
+        <div class="gen-memory-row">
+            <span class="gen-memory-label">Successful breaks in context</span>
+            <span class="gen-memory-val gen-val-break">${summary.successful_breaks}</span>
+        </div>
+        <div class="gen-memory-row">
+            <span class="gen-memory-label">Failed attempts in context</span>
+            <span class="gen-memory-val gen-val-refused">${summary.failed_attempts}</span>
+        </div>
+        <div class="gen-memory-row">
+            <span class="gen-memory-label">Language filter</span>
+            <span class="gen-memory-val">${summary.language_filter}</span>
+        </div>
+        <div class="gen-memory-row">
+            <span class="gen-memory-label">Attack type filter</span>
+            <span class="gen-memory-val">${summary.attack_type_filter}</span>
+        </div>
+        <div class="gen-memory-row">
+            <span class="gen-memory-label">Subcategory filter</span>
+            <span class="gen-memory-val">${summary.subcategory_filter}</span>
+        </div>`;
+}
+
+function toggleMemorySummary() {
+    generatorState.memorySummaryOpen = !generatorState.memorySummaryOpen;
+    $('gen-memory-body').style.display = generatorState.memorySummaryOpen ? '' : 'none';
+    $('gen-memory-toggle').textContent = generatorState.memorySummaryOpen ? '▾' : '▸';
+}
+
+function _renderGeneratedPrompts(prompts, language, attackType) {
+    const container = $('gen-prompts-container');
+    container.innerHTML = '';
+
+    prompts.forEach((p, i) => {
+        const card = document.createElement('div');
+        card.className = 'card generated-prompt-card';
+        card.id = `gen-card-${i}`;
+        card.innerHTML = `
+            <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px">
+                <span class="gen-card-num">${i + 1}</span>
+                <span class="strategy-badge">${escapeHtml(p.technique || 'unknown')}</span>
+                <span id="gen-card-status-${i}" class="strategy-badge gen-badge-untested">untested</span>
+            </div>
+            <div class="form-group" style="margin-bottom:8px">
+                <label style="font-size:11px;color:var(--text-muted)">Generated Prompt</label>
+                <textarea id="gen-prompt-text-${i}" class="gen-prompt-textarea" rows="4">${escapeHtml(p.prompt || '')}</textarea>
+            </div>
+            ${p.rationale ? `<p class="gen-rationale text-muted">${escapeHtml(p.rationale)}</p>` : ''}
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+                <button class="btn btn-sm btn-accent" onclick="copyToPromptLab(${i})">Copy to Prompt Lab</button>
+                <button class="btn btn-sm btn-ghost" onclick="markAsTested(${i}, 'FULL_BREAK', '${escapeHtml(language)}', '${escapeHtml(attackType)}')">✓ Break</button>
+                <button class="btn btn-sm btn-ghost" style="color:var(--status-partial)" onclick="markAsTested(${i}, 'PARTIAL_BREAK', '${escapeHtml(language)}', '${escapeHtml(attackType)}')">~ Partial</button>
+                <button class="btn btn-sm btn-ghost" style="color:var(--status-refused)" onclick="markAsTested(${i}, 'FULL_REFUSAL', '${escapeHtml(language)}', '${escapeHtml(attackType)}')">✗ Failed</button>
+            </div>`;
+        container.appendChild(card);
+    });
+}
+
+function copyToPromptLab(index) {
+    const textarea = $(`gen-prompt-text-${index}`);
+    if (!textarea) return;
+    switchTab('lab');
+    $('prompt-input').value = textarea.value;
+    showToast('Prompt copied to Prompt Lab');
+}
+
+async function markAsTested(index, status, language, attackType) {
+    const textarea = $(`gen-prompt-text-${index}`);
+    if (!textarea) return;
+    const prompt = textarea.value.trim();
+    if (!prompt) return;
+
+    try {
+        await api('/api/hauhau/feedback', {
+            method: 'POST',
+            body: JSON.stringify({ prompt, status, language, attack_type: attackType }),
+        });
+    } catch (e) {
+        showToast(e.message, 'error');
+        return;
+    }
+
+    // Update card border color and status badge
+    const card = $(`gen-card-${index}`);
+    const badge = $(`gen-card-status-${index}`);
+    card.classList.remove('gen-card-break', 'gen-card-partial', 'gen-card-failed');
+    badge.classList.remove('gen-badge-untested');
+    if (status === 'FULL_BREAK') {
+        card.classList.add('gen-card-break');
+        badge.textContent = 'BREAK';
+        badge.className = 'strategy-badge gen-badge-break';
+    } else if (status === 'PARTIAL_BREAK') {
+        card.classList.add('gen-card-partial');
+        badge.textContent = 'PARTIAL';
+        badge.className = 'strategy-badge gen-badge-partial';
+    } else {
+        card.classList.add('gen-card-failed');
+        badge.textContent = 'FAILED';
+        badge.className = 'strategy-badge gen-badge-failed';
+    }
+
+    showToast(`Marked as ${status} — saved to memory`);
+    _appendFeedbackLog(prompt, status);
+}
+
+function _appendFeedbackLog(prompt, status) {
+    generatorState.feedbackLog.unshift({ prompt, status, ts: new Date().toLocaleTimeString() });
+
+    const card = $('gen-feedback-card');
+    card.style.display = '';
+    const log = $('gen-feedback-log');
+
+    const badgeClass = status === 'FULL_BREAK' ? 'gen-badge-break'
+        : status === 'PARTIAL_BREAK' ? 'gen-badge-partial' : 'gen-badge-failed';
+
+    const row = document.createElement('div');
+    row.className = 'gen-feedback-row';
+    row.innerHTML = `
+        <span class="strategy-badge ${badgeClass}" style="flex-shrink:0">${status.replace('_', ' ')}</span>
+        <span class="gen-feedback-prompt">${escapeHtml(prompt.slice(0, 120))}${prompt.length > 120 ? '…' : ''}</span>
+        <span class="gen-feedback-ts text-muted">${new Date().toLocaleTimeString()}</span>`;
+    log.insertBefore(row, log.firstChild);
+}
+
