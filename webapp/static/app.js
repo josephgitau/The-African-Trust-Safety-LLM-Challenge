@@ -1634,15 +1634,22 @@ function _renderGeneratedPrompts(prompts, language, attackType) {
             <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px">
                 <span class="gen-card-num">${i + 1}</span>
                 <span class="strategy-badge">${escapeHtml(p.technique || 'unknown')}</span>
+                <span class="strategy-badge" style="background:rgba(59,130,246,0.15);color:#60a5fa">EN</span>
                 <span id="gen-card-status-${i}" class="strategy-badge gen-badge-untested">untested</span>
             </div>
             <div class="form-group" style="margin-bottom:8px">
-                <label style="font-size:11px;color:var(--text-muted)">Generated Prompt</label>
+                <label style="font-size:11px;color:var(--text-muted)">English Prompt</label>
                 <textarea id="gen-prompt-text-${i}" class="gen-prompt-textarea" rows="4">${escapeHtml(p.prompt || '')}</textarea>
+            </div>
+            <div class="form-group" style="margin-bottom:4px">
+                <label style="font-size:11px;color:var(--text-muted)">${escapeHtml(language)} Translation <span id="gen-trans-status-${i}" style="color:var(--accent)"></span></label>
+                <textarea id="gen-trans-text-${i}" class="gen-prompt-textarea" rows="4" placeholder="Click 'Translate' to generate..."></textarea>
             </div>
             ${p.rationale ? `<p class="gen-rationale text-muted">${escapeHtml(p.rationale)}</p>` : ''}
             <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-                <button class="btn btn-sm btn-accent" onclick="copyToPromptLab(${i})">Copy to Prompt Lab</button>
+                <button class="btn btn-sm btn-accent" onclick="copyToPromptLab(${i})">Copy English</button>
+                <button class="btn btn-sm btn-purple" id="gen-btn-translate-${i}" onclick="translateGenPrompt(${i}, '${escapeHtml(language)}')">Translate → ${escapeHtml(language)}</button>
+                <button class="btn btn-sm btn-ghost" id="gen-btn-copy-trans-${i}" onclick="copyTranslationToPromptLab(${i})" style="display:none">Copy ${escapeHtml(language)}</button>
                 <button class="btn btn-sm btn-ghost" onclick="markAsTested(${i}, 'FULL_BREAK', '${escapeHtml(language)}', '${escapeHtml(attackType)}')">✓ Break</button>
                 <button class="btn btn-sm btn-ghost" style="color:var(--status-partial)" onclick="markAsTested(${i}, 'PARTIAL_BREAK', '${escapeHtml(language)}', '${escapeHtml(attackType)}')">~ Partial</button>
                 <button class="btn btn-sm btn-ghost" style="color:var(--status-refused)" onclick="markAsTested(${i}, 'FULL_REFUSAL', '${escapeHtml(language)}', '${escapeHtml(attackType)}')">✗ Failed</button>
@@ -1656,7 +1663,48 @@ function copyToPromptLab(index) {
     if (!textarea) return;
     switchTab('lab');
     $('prompt-input').value = textarea.value;
-    showToast('Prompt copied to Prompt Lab');
+    showToast('English prompt copied to Prompt Lab');
+}
+
+function copyTranslationToPromptLab(index) {
+    const textarea = $(`gen-trans-text-${index}`);
+    if (!textarea || !textarea.value.trim()) return;
+    switchTab('lab');
+    $('prompt-input').value = textarea.value;
+    showToast('Translated prompt copied to Prompt Lab');
+}
+
+async function translateGenPrompt(index, targetLang) {
+    const srcTextarea = $(`gen-prompt-text-${index}`);
+    const dstTextarea = $(`gen-trans-text-${index}`);
+    const statusEl = $(`gen-trans-status-${index}`);
+    const btn = $(`gen-btn-translate-${index}`);
+    const copyBtn = $(`gen-btn-copy-trans-${index}`);
+    if (!srcTextarea || !dstTextarea) return;
+
+    const prompt = srcTextarea.value.trim();
+    if (!prompt) return;
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>';
+    statusEl.textContent = ' translating…';
+
+    try {
+        const data = await api('/api/openai/translate', {
+            method: 'POST',
+            body: JSON.stringify({ text: prompt, source_lang: 'English', target_lang: targetLang }),
+        });
+        dstTextarea.value = data.translation;
+        statusEl.textContent = ' ✓';
+        copyBtn.style.display = '';
+        showToast(`Translated to ${targetLang}`);
+    } catch (e) {
+        statusEl.textContent = ' error';
+        showToast(e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `Translate → ${targetLang}`;
+    }
 }
 
 async function markAsTested(index, status, language, attackType) {
